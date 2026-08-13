@@ -43,9 +43,8 @@ namespace
             return;
 
         WorldPacket data;
-        ChatHandler::BuildChatPacket(data, CHAT_MSG_PARTY, payload.c_str(),
-                                     LANG_ADDON, CHAT_TAG_NONE,
-                                     player->GetGUID(), player->GetName());
+        ChatHandler::BuildChatPacket(
+            data, CHAT_MSG_PARTY, LANG_ADDON, player, nullptr, payload);
 
         ServerFacade::instance().SendPacket(player, &data);
     }
