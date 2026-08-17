@@ -9,6 +9,7 @@
 #include "Define.h"
 #include "ObjectGuid.h"
 #include "Position.h"
+#include "Timer.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcProgressWatchdog.h"
 
 // All transient per-approach state for one boss-approach run, owned as a single
@@ -174,6 +175,14 @@ struct DcApproachState
     // takes the same auto-pause path as a door it knows it can't open.
     // doorStallLastMs re-arms the window: a gap in observations means the stall
     // ended (door opened, run moved on) and a later stall starts fresh.
+    //
+    // "Parked AT the door" is load-bearing, not shorthand: the action's park is
+    // also the fall-through for every walk-in failure, and the door is flagged
+    // up to 80yd ahead along the corridor, so those parks land anywhere on the
+    // approach. Only the arrival park feeds this watchdog. When it fed all of
+    // them the (5s default) budget went on travel time and runs auto-paused at
+    // doors they had never touched — see the atDoor gate in
+    // DungeonClearDoorBlockedAction.
     ObjectGuid doorStallGuid;        // door the current Blocked stall is on
     uint32 doorStallSinceMs    = 0;  // when that stall began (getMSTime)
     uint32 doorStallLastMs     = 0;  // last tick the stall was observed
@@ -250,6 +259,43 @@ struct DcApproachState
     {
         finalApproachWatch.Reset();
         pursuitWatch.Reset();
+    }
+
+    // One observation of the blocked-state watchdog, from the door-blocked
+    // action's ARRIVAL park only (see the doorStall* field comments for why the
+    // approach parks must not call this). Arms the window on a new door or after
+    // a rearmMs observation gap, records the observation, and returns whether the
+    // bot has now been working this door past timeoutMs without it opening.
+    bool ObserveDoorStall(ObjectGuid door, uint32 now, uint32 rearmMs, uint32 timeoutMs)
+    {
+        if (doorStallGuid != door || getMSTimeDiff(doorStallLastMs, now) >= rearmMs)
+        {
+            doorStallGuid    = door;
+            doorStallSinceMs = now;
+        }
+        doorStallLastMs = now;
+        return getMSTimeDiff(doorStallSinceMs, now) >= timeoutMs;
+    }
+
+    // The stall is OVER: the door has been seen open, or the corridor flag moved
+    // to a different door / cleared entirely. The next arrival park arms a fresh
+    // window instead of resuming the old one.
+    //
+    // Load-bearing for auto-closing gates. Stratholme's two King's Square Gates
+    // carry door.autoCloseTime 3000, so the cycle is: click, gate opens, tank
+    // walks through, gate re-shuts 3s later, click again. The observation-gap
+    // re-arm inside ObserveDoorStall cannot see that — DC_DOOR_STALL_REARM_MS is
+    // 10s and the gap between two arrival parks on a 3s gate is only ~3s — so
+    // three successful opens accumulated into one 7s "stall" and tripped the
+    // (5s default) watchdog on a gate the bot was opening every single time.
+    // Run tr-20260816-151006-14 died exactly there, 27.9yd from Hearthsinger
+    // Forresten with 8/13 bosses down. "The door opened" is the signal; a gap in
+    // observations is only a proxy for it.
+    void ClearDoorStall()
+    {
+        doorStallGuid.Clear();
+        doorStallSinceMs = 0;
+        doorStallLastMs  = 0;
     }
 };
 

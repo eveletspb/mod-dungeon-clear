@@ -1749,6 +1749,44 @@ bool DcObjectiveArriveAction::Execute(Event /*event*/)
         if (idx < ev->steps.size())
         {
             EventStep const& step = ev->steps[idx];
+            // A GARRISON MoveTo that has already arrived is a CAMP: the tank stands
+            // on the spot for as long as the gate takes, which on a wave gauntlet
+            // means the whole encounter. This rung sits at DcRel::AtObjective (30),
+            // above NeedsRest (26.5), so without an explicit yield the tank alone
+            // can never eat or drink between waves — the followers already can (the
+            // rest trigger defers them until they have regrouped on the tank, see
+            // DungeonClearTriggers' persistent-event branch), which is how a party
+            // ends up camped with a full group and an empty-mana tank. Same fix,
+            // and the same Yield/Hold pair, as the UseItemOnGO branch below.
+            //
+            // Only once ARRIVED: while still walking in, the move is the work.
+            // Excluded when the garrison carries a WhileHolding hook (the Ring of
+            // Law): there the hold's per-tick hook is the only thing that notices
+            // the encounter resetting behind the party, so it must not be yielded.
+            bool const garrisoned =
+                step.kind == EventStepKind::MoveTo && step.hookId == 0 &&
+                (step.creatureEntry != 0 || step.instanceDataId >= 0 ||
+                 step.persistentDataId >= 0) &&
+                bot->GetExactDist(step.x, step.y, step.z) <=
+                    (step.radius > 0.0f ? step.radius : 4.0f);
+            if (garrisoned)
+            {
+                switch (EventRestDecision())
+                {
+                    case EventRest::Yield:
+                        DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+                        SetPhase(context, "objective");
+                        ClearStall(context);
+                        return false;  // NeedsRest (26.5) wins -> the tank drinks/eats
+                    case EventRest::Hold:
+                        DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+                        SetPhase(context, "objective");
+                        ClearStall(context);
+                        return true;   // own the tick; wait for the party to recover
+                    case EventRest::None:
+                        break;
+                }
+            }
             if (step.kind == EventStepKind::KillCreature && step.engage && step.creatureEntry)
             {
                 float const search = step.radius > 0.0f ? step.radius : 250.0f;
@@ -2269,9 +2307,30 @@ bool DungeonClearDoorBlockedAction::Execute(Event event)
     // The Use() is throttled on the announced-reason transition so we don't
     // re-click a door every tick; when Advance resumes it clears the reason, so
     // a later re-close (autoclose doors) re-arms a fresh single attempt.
-    auto parkAndStall = [&]()
+    // `atDoor` is true ONLY for the park that means "the walk-in finished — the
+    // route has carried us to the near side of the doorway". Every other caller
+    // is a walk-in FAILURE fallback (no corridor, unresolvable GO, a glide tick
+    // that made no progress) and can fire anywhere across the up-to-80yd
+    // approach the blocking-door value looks ahead over. The distinction gates
+    // the blocked-state watchdog below; see the comment there.
+    std::string const waitReason =
+        "A gate has closed on us — waiting for it to open.";
+
+    auto parkAndStall = [&](bool atDoor)
     {
         DcMovement::StopBot(bot, DcMovement::Stop::Soft);
+
+        // Self-clearing script barriers (Stratholme's two gate traps) shut for a
+        // bounded 20s under instance-script control and reopen themselves. There
+        // is nothing to click and nothing for a player to come and solve, so the
+        // pause path below is simply wrong: hold, report, and let the door's own
+        // timer free us. Checked FIRST so neither the click ladder nor the
+        // blocked-state watchdog ever sees one.
+        if (door && DcEventDoorRegistry::IsSelfClearing(door->GetEntry()))
+        {
+            StallDungeonClear(botAI, waitReason);
+            return true;
+        }
 
         // Script-only event doors (e.g. SFK's Courtyard Door 18895) wear a
         // plainly-clickable empty-lock template but the client only opens them
@@ -2292,6 +2351,14 @@ bool DungeonClearDoorBlockedAction::Execute(Event event)
                 // noticed yet. Drop the stall immediately so the status panel
                 // stops reporting Blocked at an open door; Advance resumes the
                 // moment the value refreshes empty.
+                //
+                // Also end the blocked-state watchdog window: we have direct
+                // proof the door opens for us, so a later re-close (autoclose
+                // gates) must start counting from scratch rather than resume an
+                // old window. See DcApproachState::ClearDoorStall.
+                context->GetValue<DcApproachState&>(DcKey::ApproachState)
+                    ->Get()
+                    .ClearDoorStall();
                 ClearStall(context);
                 return true;
             }
@@ -2310,15 +2377,24 @@ bool DungeonClearDoorBlockedAction::Execute(Event event)
             // still shut, give up and fall through to the auto-pause below:
             // the stashed GUID still auto-resumes the run the moment the door
             // really opens (event completes, or a player opens it).
-            if (doorAppr.doorStallGuid != door->GetGUID() ||
-                getMSTimeDiff(doorAppr.doorStallLastMs, now) >= DC_DOOR_STALL_REARM_MS)
-            {
-                doorAppr.doorStallGuid = door->GetGUID();
-                doorAppr.doorStallSinceMs = now;
-            }
-            doorAppr.doorStallLastMs = now;
-            timedOut = getMSTimeDiff(doorAppr.doorStallSinceMs, now) >=
-                       DcSettings::GetUInt(bot, "DoorBlockedTimeout") * 1000;
+            //
+            // ONLY accrues once the walk-in has actually reached the doorway
+            // (atDoor). The failure-fallback parks reach this lambda from
+            // anywhere along the approach, and counting them spent the whole
+            // (5s default) budget on TRAVEL time: the run auto-paused at a door
+            // it had never touched, with zero Use() calls behind it. Scholomance
+            // batch tp-20260815-132009-1 lost two runs to exactly that:
+            // tr-20260815-132014-4 auto-paused 77.8yd from the third Iron Gate
+            // after 5s of "holding, not clicking", and -10 auto-paused in the
+            // same tick it first reached the second gate, having spent its whole
+            // budget on the approach. Sibling runs hit the identical hold at the
+            // identical gates and finished — theirs merely lasted under 5s.
+            // Away from the door we hold and report and leave the watchdog
+            // untouched, so arrival always opens a fresh window.
+            if (atDoor)
+                timedOut = doorAppr.ObserveDoorStall(
+                    door->GetGUID(), now, DC_DOOR_STALL_REARM_MS,
+                    DcSettings::GetUInt(bot, "DoorBlockedTimeout") * 1000);
 
             // A click is only legitimate from beside the door. Parked far from
             // it (mis-flag, or the walk-in hasn't closed the gap yet), hold
@@ -2410,7 +2486,7 @@ bool DungeonClearDoorBlockedAction::Execute(Event event)
         LOG_INFO("playerbots.dungeonclear",
                  "[DC:{}] door-blocked: door guid {} unresolved -> parking in place",
                  bot->GetName(), doorGuid.ToString());
-        return parkAndStall();
+        return parkAndStall(/*atDoor*/ false);
     }
 
     // GetExactDist is to the door's GO origin (hinge/jamb) — kept only for log
@@ -2456,12 +2532,14 @@ bool DungeonClearDoorBlockedAction::Execute(Event event)
     if (!path.reachable || path.segments.empty())
     {
         // No corridor to follow (boss-side route gone). Hold the door line
-        // from wherever we are rather than thrash.
+        // from wherever we are rather than thrash. With no route there is no
+        // along-path arrival test, so straight-line range to the GO is the only
+        // "are we actually at it" signal left.
         LOG_DEBUG("playerbots.dungeonclear",
                   "[DC:{}] door-blocked: no long-path corridor ({:.1f}yd from door) "
                   "-> park in place",
                   bot->GetName(), distToDoor);
-        return parkAndStall();
+        return parkAndStall(bot->IsWithinDistInMap(door, DC_DOOR_USE_RANGE));
     }
 
     // Park on the NEAR side: stop once the route is within DC_DOOR_STOP_DISTANCE
@@ -2474,13 +2552,23 @@ bool DungeonClearDoorBlockedAction::Execute(Event event)
         DcEngageGeometry::DistAlongPathToClosedDoor(
             bot, path, door->GetPositionX(), door->GetPositionY(),
             door->GetPositionZ(), /*lookAhead*/ 100.0f);
+    // "Actually at the doorway", the predicate the blocked-state watchdog runs
+    // on. Primary signal is the along-path arrival below. The straight-line
+    // fallback covers a door the along-path scan can't place (the route's
+    // polyline never enters its band, or the band entry reads as already behind
+    // the progress cursor, both of which return FLT_MAX): standing on top of a
+    // shut gate is at it whatever the route says, and without the fallback such
+    // a door could be worked forever with the watchdog never arming.
+    bool const atDoor = distAlongToDoor <= DC_DOOR_STOP_DISTANCE ||
+                        bot->IsWithinDistInMap(door, DC_DOOR_USE_RANGE);
+
     if (distAlongToDoor <= DC_DOOR_STOP_DISTANCE)
     {
         LOG_DEBUG("playerbots.dungeonclear",
                   "[DC:{}] door-blocked: at door ({:.1f}yd along path) -> parking, "
                   "waiting for it to open",
                   bot->GetName(), distAlongToDoor);
-        return parkAndStall();
+        return parkAndStall(atDoor);
     }
 
     DungeonFollowerState& follower =
@@ -2499,8 +2587,11 @@ bool DungeonClearDoorBlockedAction::Execute(Event event)
     //   - ReachedEnd: corridor end = as close as the navmesh allows (the door's
     //             collision truncates the route here) -> the real "at the door".
     //   - OffPathLost / Blocked: can't make progress -> park and report.
-    switch (DriveGlideToEnd(path, follower, appr, appr.doorWalkInWatch, bot->GetMapId(),
-                            "door walk-in"))
+    GlideOutcome const outcome =
+        DriveGlideToEnd(path, follower, appr, appr.doorWalkInWatch, bot->GetMapId(),
+                        "door walk-in");
+    char const* outcomeName = "?";
+    switch (outcome)
     {
         case GlideOutcome::Moved:
             ClearStall(context);
@@ -2508,9 +2599,27 @@ bool DungeonClearDoorBlockedAction::Execute(Event event)
         case GlideOutcome::Riding:
             return true;
         case GlideOutcome::ReachedEnd:
-        case GlideOutcome::OffPathLost:
-        case GlideOutcome::Blocked:
+            outcomeName = "reached-end";
             break;  // can't make progress at the door -> park and report below.
+        case GlideOutcome::OffPathLost:
+            outcomeName = "off-path-lost";
+            break;
+        case GlideOutcome::Blocked:
+            outcomeName = "blocked";
+            break;
     }
-    return parkAndStall();
+
+    // Name the no-progress outcome. All three are silent inside the driver, so a
+    // walk-in frozen short of the doorway used to leave nothing in the log but a
+    // repeating "holding, not clicking" at an unchanging distance — no way to
+    // tell a truncated route from an off-path loss from an impaired bot.
+    // distAlongToDoor is FLT_MAX when the scan couldn't place the door on the
+    // route at all (its band is past the look-ahead, or reads as already behind
+    // the progress cursor); report that as -1 rather than a nonsense distance.
+    LOG_DEBUG("playerbots.dungeonclear",
+              "[DC:{}] door-blocked: walk-in made no progress ({}) {:.1f}yd from door, "
+              "{:.1f}yd along path (-1 = unplaced) -> parking",
+              bot->GetName(), outcomeName, distToDoor,
+              distAlongToDoor >= std::numeric_limits<float>::max() ? -1.0f : distAlongToDoor);
+    return parkAndStall(atDoor);
 }

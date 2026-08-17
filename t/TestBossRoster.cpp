@@ -1090,3 +1090,86 @@ TEST(BossRosterRegistryTest, SethekkAnzuSweepSpansTheWholeAnteChamber)
     EXPECT_NEAR(ev->steps[settleIdx].x, -88.0f, 1.0f);
     EXPECT_NEAR(ev->steps[settleIdx].y, 288.0f, 1.0f);
 }
+
+// --- Apply: Maraudon drops Rotgrip ---------------------------------------
+
+// Rotgrip lives in the Pristine Waters lake — open water the party cannot be
+// navigated to — so he is removed from the clear entirely. The rest of the
+// Maraudon roster must survive the patch untouched and stay in clear order.
+TEST(BossRosterRegistryTest, MaraudonDropsRotgrip)
+{
+    // The auto-derived Maraudon list as BossSpawnIndex emits it (DBC bits).
+    std::vector<DungeonBossInfo> base = {
+        Boss(13282, 0, "Noxxion", 349),
+        Boss(12258, 1, "Razorlash", 349),
+        Boss(12236, 2, "Lord Vyletongue", 349),
+        Boss(12225, 3, "Celebras the Cursed", 349),
+        Boss(12203, 4, "Landslide", 349),
+        Boss(13601, 5, "Tinkerer Gizlock", 349),
+        Boss(13596, 6, "Rotgrip", 349),
+        Boss(12201, 7, "Princess Theradras", 349),
+    };
+
+    std::vector<DungeonBossInfo> const out =
+        BossRosterRegistry::Apply(349, DUNGEON_DIFFICULTY_NORMAL, base);
+
+    EXPECT_TRUE(BossRosterRegistry::HasPatch(349));
+    EXPECT_EQ(Find(out, 13596), nullptr)
+        << "Rotgrip is unreachable (open water) — he must not be in the clear list";
+    ASSERT_EQ(out.size(), base.size() - 1);
+
+    // Everything else survives, in DBC-bit order — the patch removes only.
+    uint32 const expected[] = {13282, 12258, 12236, 12225, 12203, 13601, 12201};
+    for (size_t i = 0; i < out.size(); ++i)
+        EXPECT_EQ(out[i].entry, expected[i]) << "clear order changed at slot " << i;
+
+    // Princess Theradras (the real end boss, one bit after Rotgrip) must keep
+    // her own kill-bit: removing Rotgrip must not renumber anything.
+    DungeonBossInfo const* princess = Find(out, 12201);
+    ASSERT_NE(princess, nullptr);
+    EXPECT_EQ(princess->encounterIndex, 7u);
+}
+
+// --- Apply: Dire Maul North drops Cho'Rush -------------------------------
+
+// Cho'Rush the Observer carries a real DungeonEncounter row but his SmartAI
+// sets faction 35 (friendly to all) 5s after spawn and never reverts, so his
+// kill-bit can never be set. Left in, he is the anchor the North clear parks on
+// forever (tr-20260816-061103-16 idled on him for 40 minutes after King Gordok
+// died). The rest of the North roster must survive untouched and in order.
+TEST(BossRosterRegistryTest, DireMaulNorthDropsChoRush)
+{
+    // The auto-derived North list as BossSpawnIndex emits it (DBC bits).
+    std::vector<DungeonBossInfo> base = {
+        Boss(14326, 1, "Guard Mol'dar", 429),
+        Boss(14322, 2, "Stomper Kreeg", 429),
+        Boss(14321, 3, "Guard Fengus", 429),
+        Boss(14323, 4, "Guard Slip'kik", 429),
+        Boss(14325, 5, "Captain Kromcrush", 429),
+        Boss(14324, 6, "Cho'Rush the Observer", 429),
+        Boss(11501, 7, "King Gordok", 429),
+    };
+
+    std::vector<DungeonBossInfo> const out =
+        BossRosterRegistry::Apply(429, DUNGEON_DIFFICULTY_NORMAL, base);
+
+    EXPECT_EQ(Find(out, 14324), nullptr)
+        << "Cho'Rush is permanently friendly — he must not be in the clear list";
+
+    // The North bosses that remain keep their DBC order. (Dire Maul shares ONE
+    // map-429 patch across wings, so Apply() also appends the East/West
+    // objectives — filter to real creatures before checking the order.)
+    std::vector<uint32> kept;
+    for (DungeonBossInfo const& b : out)
+        if (b.kind != DungeonAnchorKind::Objective)
+            kept.push_back(b.entry);
+
+    std::vector<uint32> const expected = {14326, 14322, 14321, 14323, 14325, 11501};
+    EXPECT_EQ(kept, expected) << "North clear order changed";
+
+    // King Gordok (the real end boss, one bit after Cho'Rush) keeps his own
+    // kill-bit: removing Cho'Rush must not renumber anything.
+    DungeonBossInfo const* gordok = Find(out, 11501);
+    ASSERT_NE(gordok, nullptr);
+    EXPECT_EQ(gordok->encounterIndex, 7u);
+}
