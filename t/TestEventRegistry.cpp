@@ -1038,3 +1038,125 @@ TEST(DungeonEventIntegrityTest, EveryAuthoredObjectiveHookIdIsRegistered)
     EXPECT_FALSE(ObjectiveHookRegistry::Has(11))
         << "hook id 11 is RETIRED (old BmPullDrainers) and must stay unused";
 }
+
+// --- Utgarde Keep (574): the forge masters must be swept ONE AT A TIME -----
+// The three Dragonflayer Forge Masters share entry 24079 and refuse to be fought
+// out of order (npc_dragonflayer_forge_master::JustEngagedWith EnterEvadeMode()s
+// unless the previous forge's instance bit is set). The ordering is bought by
+// three separate position-anchored ClearRadius sweeps, one per forge, wired to
+// three roster objectives in order. Two ways to break that silently, both pinned
+// here: collapsing the sweeps onto one entry-keyed KillCreature step, and adding
+// the usual by-entry backstop — either would seek the NEAREST 24079 and re-open
+// the out-of-order engage.
+TEST(DungeonEventIntegrityTest, UtgardeKeepForgesAreSweptOneAtATime)
+{
+    constexpr uint32 UK_FORGE_MASTER = 24079;
+    struct Forge { uint32 eventId; float x; float y; };
+    // West -> east -> north, the order the instance script enforces.
+    Forge const kForges[] = {
+        { 1, 349.6f, -39.3f },
+        { 2, 385.8f, -16.2f },
+        { 3, 347.6f,   4.6f },
+    };
+
+    for (Forge const& f : kForges)
+    {
+        DungeonEvent const* ev = DungeonEventRegistry::Find(/*map*/ 574, f.eventId);
+        ASSERT_NE(ev, nullptr) << "Utgarde Keep (574) event " << f.eventId << " is missing";
+
+        EXPECT_EQ(ev->activation, EventActivation::Anchored)
+            << "the forge order is bought by the OBJECTIVE order, so each sweep must"
+               " be anchored to its own objective, not fired by a predicate";
+        EXPECT_EQ(ev->gate, DcDifficultyGate::Any)
+            << "the ordering script runs in both difficulties";
+        EXPECT_FALSE(ev->required)
+            << "nothing gates on ForgeEventMask but the masters themselves, so a"
+               " wedged forge must degrade rather than stall the run";
+
+        ASSERT_EQ(ev->steps.size(), 1u)
+            << "event " << f.eventId << " must be exactly one sweep — a second step"
+               " would make it a rewind hazard needing .Persistent()";
+        EventStep const& s = ev->steps[0];
+        EXPECT_EQ(s.kind, EventStepKind::ClearRadius)
+            << "must be POSITION-anchored: KillCreature resolves by ENTRY and all"
+               " three masters share 24079, so it would seek the nearest one";
+        ASSERT_EQ(s.entryFilter.size(), 1u) << "the sweep must be entry-filtered";
+        EXPECT_EQ(s.entryFilter[0], UK_FORGE_MASTER);
+        EXPECT_NEAR(s.x, f.x, 0.5f) << "sweep centred on its own forge master";
+        EXPECT_NEAR(s.y, f.y, 0.5f);
+        // 12yd names exactly one master: they are 41-44yd apart and the nearest
+        // other spawn to any of them is 14.7yd. A wider volume would swallow a
+        // neighbouring forge and the ordering with it.
+        EXPECT_GT(s.radius, 0.0f);
+        EXPECT_LE(s.radius, 14.0f)
+            << "a sweep wider than the 14.7yd nearest neighbour stops naming one forge";
+        EXPECT_GT(s.timeoutMs, 30000u)
+            << "the 30s EventStepTimeout default is short of a walk-in plus an elite kill";
+
+        // NO by-entry backstop, deliberately — see the file note.
+        for (EventStep const& step : ev->steps)
+            EXPECT_FALSE(step.kind == EventStepKind::KillCreature &&
+                         step.creatureEntry == UK_FORGE_MASTER)
+                << "a KillCreature(Engage) backstop on 24079 seeks the NEAREST master,"
+                   " which past forge 1 is usually the wrong one — it undoes the"
+                   " ordering these three objectives exist to buy";
+    }
+
+    // The three sweeps must be three DISTINCT places, not a copy-paste of one.
+    EXPECT_NE(DungeonEventRegistry::Find(574, 1)->steps[0].x,
+              DungeonEventRegistry::Find(574, 3)->steps[0].x);
+    EXPECT_NE(DungeonEventRegistry::Find(574, 1)->steps[0].y,
+              DungeonEventRegistry::Find(574, 2)->steps[0].y);
+}
+
+// --- The Nexus (576): three sphere clicks are what free Keristrasza --------
+// Keristrasza spawns UNIT_FLAG_NON_ATTACKABLE inside a frozen prison, and
+// boss_keristrasza::CanRemovePrison only lets go once DATA_TELESTRA_ORB,
+// DATA_ANOMALUS_ORB and DATA_ORMOROK_ORB are all DONE. The only thing in the
+// instance that sets any of them is a click on the matching Containment Sphere
+// (each GO's smart_scripts SMART_EVENT_GOSSIP_HELLO -> SET_INST_DATA). Miss one
+// and the run walks to an unattackable last boss and stalls, so all three clicks
+// must be Required, distinct, and ordered after the orb bosses.
+TEST(DungeonEventIntegrityTest, NexusSpheresAreThreeRequiredClicks)
+{
+    struct Sphere { uint32 eventId; uint32 goEntry; };
+    Sphere const kSpheres[] = {
+        { 1, 188526 },  // Telestra's
+        { 2, 188528 },  // Ormorok's
+        { 3, 188527 },  // Anomalus'
+    };
+
+    for (Sphere const& sp : kSpheres)
+    {
+        DungeonEvent const* ev = DungeonEventRegistry::Find(/*map*/ 576, sp.eventId);
+        ASSERT_NE(ev, nullptr) << "The Nexus (576) event " << sp.eventId << " is missing";
+
+        EXPECT_EQ(ev->activation, EventActivation::Anchored)
+            << "each sphere gets its own objective anchor so boss-nav does the walk"
+               " — the three are 40-57yd apart, past what an event step's own HopTo"
+               " is meant to cover";
+        EXPECT_EQ(ev->gate, DcDifficultyGate::Any)
+            << "the prison gates Keristrasza on both difficulties";
+        EXPECT_TRUE(ev->required)
+            << "these gate the LAST BOSS — a sphere that will not click must surface"
+               " as a stall, not be skipped past onto an unattackable Keristrasza";
+
+        ASSERT_EQ(ev->steps.size(), 1u)
+            << "one click; a second step would make it a rewind hazard needing"
+               " .Persistent()";
+        EventStep const& s = ev->steps[0];
+        EXPECT_EQ(s.kind, EventStepKind::UseGameObject);
+        EXPECT_EQ(s.goEntry, sp.goEntry);
+        EXPECT_GT(s.radius, 8.0f)
+            << "the GO search must cover the objective's 8yd arrive radius";
+        EXPECT_GT(s.timeoutMs, 30000u)
+            << "the step deliberately HOLDS on a still-NOT_SELECTABLE sphere, so the"
+               " default 30s would read a boss-state race as a failure";
+    }
+
+    // Three DISTINCT spheres, not a copy-paste of one.
+    EXPECT_NE(DungeonEventRegistry::Find(576, 1)->steps[0].goEntry,
+              DungeonEventRegistry::Find(576, 2)->steps[0].goEntry);
+    EXPECT_NE(DungeonEventRegistry::Find(576, 2)->steps[0].goEntry,
+              DungeonEventRegistry::Find(576, 3)->steps[0].goEntry);
+}
