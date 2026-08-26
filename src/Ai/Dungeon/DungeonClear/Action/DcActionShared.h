@@ -18,6 +18,7 @@
 #include <string>
 
 #include "Define.h"
+#include "Api/DungeonClearStopCause.h"
 
 class PlayerbotAI;
 class Player;
@@ -157,7 +158,10 @@ namespace DcActionShared
     // reason. Mode goes disabled. Every run-end path funnels through here, so
     // this is also where the `.dc test` harness observes the run ending (see
     // DcTestRunManager::OnRunDisabled — a no-op outside a monitored test run).
-    void DisableDungeonClear(PlayerbotAI* botAI, std::string const& reason);
+    void DisableDungeonClear(
+        PlayerbotAI* botAI,
+        std::string const& reason,
+        DungeonClear::StopCause cause = DungeonClear::StopCause::Internal);
 
     // Mode stays enabled; set a stall reason the fallback trigger / `dc status`
     // read, announced once per reason change.

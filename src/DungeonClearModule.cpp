@@ -87,6 +87,7 @@
 #include "TestRun/DcTestDriver.h"
 #include "TestRun/DcTestDungeonRegistry.h"
 #include "TestRun/DcTestPlanManager.h"
+#include "TestRun/DcTestRaidRegistry.h"
 #include "TestRun/DcTestRunManager.h"
 
 namespace
@@ -231,6 +232,7 @@ public:
         // The dashboard's test-plan start form needs the dungeon catalogue +
         // caps; publish them once the config is final (first world tick).
         DcTestDungeonRegistry::WriteSidecar();
+        DcTestRaidRegistry::WriteSidecar();
 
         LOG_INFO("module", "mod-dungeon-clear: registered DungeonClear contexts "
                            "(strategy/action/trigger/value) into all class "

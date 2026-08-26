@@ -419,6 +419,45 @@ std::string DcStatusPublisher::BuildStatusPayload(PlayerbotAI* botAI)
 
     return addonMsg.str();
 }
+
+bool DcStatusPublisher::ParseStatusPayload(std::string const& payload, DcStatusPayload& status)
+{
+    std::vector<std::string> parts;
+    std::size_t from = 0;
+    while (from <= payload.size())
+    {
+        std::size_t const tab = payload.find('\t', from);
+        if (tab == std::string::npos)
+        {
+            parts.push_back(payload.substr(from));
+            break;
+        }
+        parts.push_back(payload.substr(from, tab - from));
+        from = tab + 1;
+    }
+
+    if (parts.size() < 8 || parts[0] != "STATUS")
+        return false;
+
+    try
+    {
+        status.enabled = parts[1] == "1";
+        status.bossEntry = static_cast<uint32>(std::stoul(parts[2]));
+        status.bossName = parts[3];
+        status.stall = parts[4];
+        status.skipped = static_cast<uint32>(std::stoul(parts[5]));
+        status.state = parts[6];
+        status.detail = parts[7];
+        status.pullSetting = parts.size() > 8 ? static_cast<uint32>(std::stoul(parts[8])) : 0;
+        status.pullDecision = parts.size() > 9 ? static_cast<uint32>(std::stoul(parts[9])) : 0;
+    }
+    catch (std::exception const&)
+    {
+        return false;
+    }
+    return true;
+}
+
 void DcStatusPublisher::PushStatus(PlayerbotAI* botAI)
 {
     if (!botAI)

@@ -355,7 +355,10 @@ bool DcOffAction::Execute(Event event)
     // which all route through DisableDungeonClear. This closes the drift where
     // those paths never revoked the leader's daze immunity. The same "CHAT\t<reason>"
     // addon line and `dc status` refresh are emitted inside it.
-    DcActionShared::DisableDungeonClear(botAI, "Dungeon clear disabled.");
+    DcActionShared::DisableDungeonClear(
+        botAI,
+        "Dungeon clear disabled.",
+        DungeonClear::StopCause::Manual);
 
     // dc-off-only extras the shared teardown doesn't cover: clear the fallback
     // target, then hard-stop any in-flight advance/engage spline so the bot visibly
@@ -1226,4 +1229,3 @@ bool DcPullAction::Execute(Event event)
     botAI->DoSpecificAction("dc status", event, true);
     return true;
 }
-

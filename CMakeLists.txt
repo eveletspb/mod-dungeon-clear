@@ -75,6 +75,9 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 #   (pure instance-bind planner for `.dc test watch`: which binds to release,
 #    whether to re-bind, and whether the teleport must be forced far so a
 #    second watch lands in the LIVE copy instead of the finished one)
+# src/Api/DungeonClearSpectator.{h,cpp}
+#   (public world-thread watch service shared by launchers; owns spectator
+#    camera, instance bind, teleport and return-position bookkeeping)
 # Data/RoomAggroRegistry.{h,cpp}
 #   (room-wide-aggro boss table: bosses that force the whole room into combat on
 #    engage; the tank clears the room before the pull — ClearRoomBeforeBoss)
@@ -185,6 +188,9 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 #    DriveUseItemOnGO so the tank waits for the party between houses instead of
 #    sprinting off while the panel reports "waiting".)
 # TestRun/DcTestRunVerdict.{h,cpp}, TestRun/DcTestDungeonRegistry.{h,cpp},
+# TestRun/DcTestRaidRegistry.{h,cpp},
+# TestRun/DcRaidLaunchRequest.{h,cpp},
+# TestRun/DcRaidRequestGateway.{h,cpp},
 # TestRun/DcTestComp.{h,cpp}, TestRun/DcTestRunRecord.{h,cpp},
 # TestRun/DcTestRunManager.{h,cpp}
 #   (`.dc test` automated dungeon test harness: pure verdict kernel + supported-

@@ -42,7 +42,9 @@ namespace
 
         if (DcRun::Of(ctx).enabled)
             DcActionShared::DisableDungeonClear(
-                botAI, "Left the dungeon \xe2\x80\x94 dungeon clear disabled.");
+                botAI,
+                "Left the dungeon \xe2\x80\x94 dungeon clear disabled.",
+                DungeonClear::StopCause::LeftInstance);
 
         ObjectGuid& followed =
             ctx->GetValue<ObjectGuid>(DcKey::FollowedTank)->RefGet();

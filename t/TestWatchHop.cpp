@@ -10,6 +10,7 @@
 using DcWatchHop::Bind;
 using DcWatchHop::Decide;
 using DcWatchHop::Plan;
+using DcWatchHop::SessionPlan;
 using DcWatchHop::Where;
 
 namespace
@@ -161,4 +162,34 @@ TEST(DcWatchHop, NonInstancedTargetPlansNoBindWork)
     EXPECT_FALSE(p.bindToTarget);
     EXPECT_FALSE(p.forceNewInstance);
     EXPECT_TRUE(p.release.empty());
+}
+
+TEST(DcWatchHop, ColdSessionPreservesReturnPositionAndHidesViewer)
+{
+    SessionPlan const p = DcWatchHop::DecideSession(
+        {0, 0}, RunA(), 0, {}, false, false);
+
+    EXPECT_TRUE(p.saveReturnPosition);
+    EXPECT_TRUE(p.ownGmMode);
+    EXPECT_TRUE(p.hop.bindToTarget);
+}
+
+TEST(DcWatchHop, HopBetweenWatchedRunsKeepsOriginalReturnPosition)
+{
+    SessionPlan const p = DcWatchHop::DecideSession(
+        {RAMPARTS, 100}, RunB(), 100, {RunA()}, true, true);
+
+    EXPECT_FALSE(p.saveReturnPosition);
+    EXPECT_TRUE(p.ownGmMode);
+    EXPECT_TRUE(p.hop.forceNewInstance);
+    EXPECT_TRUE(Releases(p.hop, RunA()));
+}
+
+TEST(DcWatchHop, ExistingGmModeIsNeverOwnedByWatchSession)
+{
+    SessionPlan const p = DcWatchHop::DecideSession(
+        {0, 0}, RunA(), 0, {}, true, false);
+
+    EXPECT_TRUE(p.saveReturnPosition);
+    EXPECT_FALSE(p.ownGmMode);
 }

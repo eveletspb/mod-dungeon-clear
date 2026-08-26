@@ -4,6 +4,7 @@
  */
 
 #include "TestRun/DcTestRunJob.h"
+#include "TestRun/DcLiveBotSnapshot.h"
 
 #include <algorithm>
 #include <array>
@@ -44,6 +45,7 @@
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcStatusPublisher.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 #include "TestRun/DcDiagSnapshot.h"
 #include "TestRun/DcTestComp.h"
@@ -514,25 +516,14 @@ DcTestRunLive::RunSnapshot DcTestRunJob::Snapshot() const
             continue;
         if (s.mapId < 0)
             s.mapId = static_cast<std::int32_t>(p->GetMapId());
-        DcTestRunLive::BotPos bp;
-        bp.role = slot.role;
+        DcTestRunLive::BotPos bp = DcTestRunLive::CaptureBot(p, slot.role, slot.classId);
         // The slot only knows class/spec/role; the name belongs to the char the
         // pool handed out, so it has to come off the resolved player.
-        bp.name = p->GetName();
-        bp.classId = slot.classId;
-        bp.x = p->GetPositionX();
-        bp.y = p->GetPositionY();
-        bp.z = p->GetPositionZ();
-        bp.alive = p->IsAlive();
-        bp.hp = static_cast<std::uint8_t>(bp.alive ? p->GetHealthPct() : 0.f);
         // Gate on the mana POOL, not on getPowerType(): a druid shifted into
         // bear/cat reports RAGE/ENERGY while still holding the mana it has to
         // shift back and drink for. Keying off the active power type would blank
         // the bar for exactly the member whose mana the run is waiting on.
         // Non-mana classes have maxMana 0 and stay at the -1 "no bar" default.
-        if (bp.alive && p->GetMaxPower(POWER_MANA) > 0)
-            bp.mp = static_cast<std::int16_t>(p->GetPowerPct(POWER_MANA));
-        bp.inCombat = p->IsInCombat();
         if (bp.inCombat)
             s.inCombat = true;
         s.bots.push_back(std::move(bp));
@@ -2169,27 +2160,13 @@ void DcTestRunJob::OnStatusPayload(std::string const& payload)
     if (stage != Stage::Monitoring && stage != Stage::Starting)
         return;
 
-    // Payload: STATUS \t enabled \t bossEntry \t bossName \t stall \t skipped
-    //          \t state \t detail \t pullSetting \t pullDecision
-    std::vector<std::string> parts;
-    std::size_t from = 0;
-    while (from <= payload.size())
-    {
-        std::size_t const tab = payload.find('\t', from);
-        if (tab == std::string::npos)
-        {
-            parts.push_back(payload.substr(from));
-            break;
-        }
-        parts.push_back(payload.substr(from, tab - from));
-        from = tab + 1;
-    }
-    if (parts.size() < 8 || parts[0] != "STATUS")
+    DcStatusPayload status;
+    if (!DcStatusPublisher::ParseStatusPayload(payload, status))
         return;
 
     std::lock_guard<std::mutex> lock(_obsMutex);
-    if (parts[6] == _lastStatusState)
+    if (status.state == _lastStatusState)
         return;
-    _lastStatusState = parts[6];
-    _record.statusTimeline.push_back({_totalMs / 1000, parts[6], parts[7]});
+    _lastStatusState = status.state;
+    _record.statusTimeline.push_back({_totalMs / 1000, status.state, status.detail});
 }

@@ -16,7 +16,6 @@
 #include "Chat.h"
 #include "ChatCommand.h"
 #include "Group.h"
-#include "InstanceSaveMgr.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
@@ -28,12 +27,13 @@
 #include <cmath>
 #include <cstdlib>
 #include <sstream>
-#include <unordered_map>
 #include <vector>
 
 #include "PlayerbotAIConfig.h"
+#include "Playerbots.h"
 
 #include "DungeonClearDispatch.h"
+#include "Api/DungeonClearSpectator.h"
 #include "TestRun/DcTestDriver.h"
 #include "TestRun/DcTestDungeonRegistry.h"
 #include "TestRun/DcTestGearTiers.h"
@@ -41,15 +41,64 @@
 #include "TestRun/DcTestPlanManager.h"
 #include "TestRun/DcTestRunManager.h"
 #include "Util/DcSpectator.h"
-#include "Util/DcWatchHop.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettingsRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
+
 
 using namespace Acore::ChatCommands;
 
 namespace
 {
+#if 0 // Moved to mod-raid-runner; kept temporarily for one source-level migration commit.
+    struct DcRaidRndCandidate
+    {
+        ObjectGuid guid;
+        uint8 classId = 0;
+    };
+
+    std::vector<DcRaidRndCandidate> LoadRndRaidCandidates(bool alliance)
+    {
+        std::vector<DcRaidRndCandidate> candidates;
+        QueryResult accountResults = PlayerbotsDatabase.Query(
+            "SELECT account_id FROM playerbots_account_type WHERE account_type = 1");
+        if (!accountResults)
+            return candidates;
+
+        do
+        {
+            uint32 const accountId = accountResults->Fetch()[0].Get<uint32>();
+            CharacterDatabasePreparedStatement* statement =
+                CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARS_BY_ACCOUNT_ID);
+            statement->SetData(0, accountId);
+            PreparedQueryResult result = CharacterDatabase.Query(statement);
+            if (!result)
+                continue;
+
+            do
+            {
+                Field* fields = result->Fetch();
+                ObjectGuid const guid = ObjectGuid::Create<HighGuid::Player>(fields[0].Get<uint32>());
+                uint8 const classId = fields[1].Get<uint8>();
+                uint8 const race = fields[2].Get<uint8>();
+                bool const candidateAlliance = race == 1 || race == 3 || race == 4 || race == 7 || race == 11;
+                if (candidateAlliance != alliance || classId == 10 ||
+                    sCharacterCache->GetCharacterLevelByGuid(guid) < 60 ||
+                    ObjectAccessor::FindConnectedPlayer(guid))
+                    continue;
+                uint32 const guildId = sCharacterCache->GetCharacterGuildIdByGuid(guid);
+                if (guildId && PlayerbotGuildMgr::instance().IsRealGuild(guildId))
+                    continue;
+                candidates.push_back({guid, classId});
+            } while (result->NextRow());
+        } while (accountResults->NextRow());
+
+        std::mt19937 generator(std::random_device{}());
+        std::shuffle(candidates.begin(), candidates.end(), generator);
+        return candidates;
+    }
+#endif
+
     bool RunDcCommand(ChatHandler* handler, std::string const& action, std::string const& param = "")
     {
         Player* issuer = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
@@ -221,48 +270,6 @@ namespace
         return true;
     }
 
-    // --- `.dc test watch` instance-bind bookkeeping --------------------------
-    //
-    // Entering a run's instance binds the watcher to it (see HandleTestWatch),
-    // and that bind outlives the run. Remember the ones WE made so the next
-    // watch — and `watch off` — can release exactly those and never a lockout
-    // the human earned themselves.
-    //
-    // World thread only: every writer is a chat command handler. Entries are
-    // keyed by GUID and released on the next watch, so a watcher who logs out
-    // mid-run leaves at most one stale row, which the next hop clears (an
-    // unbind of a bind that no longer exists is a no-op).
-    std::unordered_map<ObjectGuid, std::vector<DcWatchHop::Bind>> g_watchBinds;
-
-    std::vector<DcWatchHop::Bind> HeldWatchBinds(Player* gm)
-    {
-        auto it = g_watchBinds.find(gm->GetGUID());
-        return it == g_watchBinds.end() ? std::vector<DcWatchHop::Bind>() : it->second;
-    }
-
-    void ReleaseWatchBinds(Player* gm, std::vector<DcWatchHop::Bind> const& binds)
-    {
-        if (binds.empty())
-            return;
-
-        auto& held = g_watchBinds[gm->GetGUID()];
-        for (DcWatchHop::Bind const& b : binds)
-        {
-            sInstanceSaveMgr->PlayerUnbindInstance(gm->GetGUID(), b.mapId,
-                                                   Difficulty(b.difficulty), true, gm);
-            held.erase(std::remove_if(held.begin(), held.end(),
-                                      [&b](DcWatchHop::Bind const& h)
-                                      {
-                                          return h.mapId == b.mapId &&
-                                                 h.difficulty == b.difficulty &&
-                                                 h.instanceId == b.instanceId;
-                                      }),
-                       held.end());
-        }
-
-        if (held.empty())
-            g_watchBinds.erase(gm->GetGUID());
-    }
 }
 
 class dungeon_clear_command_script : public CommandScript
@@ -281,7 +288,7 @@ public:
             { "status", HandleTestPlanStatus, SEC_GAMEMASTER, Console::Yes },
             { "stop",   HandleTestPlanStop,   SEC_GAMEMASTER, Console::Yes },
         };
-        static ChatCommandTable dcTestTable =
+    static ChatCommandTable dcTestTable =
         {
             { "start",  HandleTestStart,  SEC_GAMEMASTER, Console::Yes },
             { "status", HandleTestStatus, SEC_GAMEMASTER, Console::Yes },
@@ -318,6 +325,223 @@ public:
     static bool HandleStatus(ChatHandler* handler, Optional<std::string> param) { return RunDcCommand(handler, "dc status", param ? *param : ""); }
     static bool HandleBosses(ChatHandler* handler, Optional<std::string> param) { return RunDcCommand(handler, "dc bosses", param ? *param : ""); }
     static bool HandleGo(ChatHandler* handler, Tail targetBoss) { return RunDcCommand(handler, "dc go", std::string(targetBoss)); }
+
+#if 0 // Moved to mod-raid-runner; command registration was removed in 686278c.
+    static bool HandleRaidStart(ChatHandler* handler, Tail args)
+    {
+        Player* issuer = ResolveTestIssuer(handler);
+        std::istringstream input{std::string(args)};
+        std::string requestId;
+        std::string partySpec;
+        bool manifestMode = false;
+        input >> requestId;
+        std::string option;
+        while (input >> option)
+        {
+            if (option.rfind("party=", 0) == 0)
+                partySpec = option.substr(6);
+            else if (option == "manifest")
+                manifestMode = true;
+            else
+            {
+                handler->SendSysMessage(
+                    "Usage: .dc raid start <requestId> [party=Tank,OffTank,Heal1,Heal2,"
+                    "Dps1,Dps2,Dps3,Dps4,Dps5,Dps6] [manifest]");
+                return true;
+            }
+        }
+        if (!issuer)
+            return true;
+        if (requestId.empty())
+        {
+            handler->SendSysMessage(
+                "Usage: .dc raid start <requestId> [party=Tank,OffTank,Heal1,Heal2,"
+                "Dps1,Dps2,Dps3,Dps4,Dps5,Dps6] [manifest]");
+            return true;
+        }
+
+        static DcRaidLaunchAdmission::Coordinator coordinator(
+            std::getenv("DC_RAID_INBOX") ? std::getenv("DC_RAID_INBOX") : "dc_raid_requests");
+        DcRaidLaunchAdmission::Result result;
+        if (manifestMode && !partySpec.empty())
+        {
+            handler->SendSysMessage("party= and manifest cannot be combined.");
+            return true;
+        }
+        if (manifestMode)
+            result = coordinator.Accept(requestId, issuer);
+        else
+        {
+            std::vector<std::string> names;
+            if (!partySpec.empty())
+            {
+                std::istringstream party{partySpec};
+                std::string name;
+                while (std::getline(party, name, ','))
+                    if (!name.empty())
+                        names.push_back(name);
+            }
+            else
+            {
+                bool const alliance = issuer->GetTeamId(true) == TEAM_ALLIANCE;
+                std::unordered_set<std::uint64_t> const reserved = coordinator.ReservedGuids();
+                std::array<std::vector<uint8>, 10> const roleClasses = {
+                    std::vector<uint8>{1, 2, 11, 7, 6},
+                    std::vector<uint8>{1, 2, 11, 7, 6},
+                    std::vector<uint8>{5, 7, 2, 11},
+                    std::vector<uint8>{5, 7, 2, 11},
+                    std::vector<uint8>{1, 2, 3, 4, 5, 6, 7, 8, 9, 11},
+                    std::vector<uint8>{1, 2, 3, 4, 5, 6, 7, 8, 9, 11},
+                    std::vector<uint8>{1, 2, 3, 4, 5, 6, 7, 8, 9, 11},
+                    std::vector<uint8>{1, 2, 3, 4, 5, 6, 7, 8, 9, 11},
+                    std::vector<uint8>{1, 2, 3, 4, 5, 6, 7, 8, 9, 11},
+                    std::vector<uint8>{1, 2, 3, 4, 5, 6, 7, 8, 9, 11},
+                };
+                std::unordered_set<std::uint64_t> selected;
+                std::vector<DcRaidRndCandidate> const rndCandidates = LoadRndRaidCandidates(alliance);
+                for (std::vector<uint8> const& classes : roleClasses)
+                {
+                    ObjectGuid picked;
+                    for (uint8 classId : classes)
+                    {
+                        auto const& pool = sRandomPlayerbotMgr.addclassCache[
+                            RandomPlayerbotMgr::GetTeamClassIdx(alliance, classId)];
+                        for (ObjectGuid const& guid : pool)
+                        {
+                            std::uint64_t const value = guid.GetCounter();
+                            if (reserved.count(value) || selected.count(value) ||
+                                ObjectAccessor::FindConnectedPlayer(guid) ||
+                                sCharacterCache->GetCharacterLevelByGuid(guid) < 60)
+                                continue;
+                            uint32 const guildId = sCharacterCache->GetCharacterGuildIdByGuid(guid);
+                            if (guildId && PlayerbotGuildMgr::instance().IsRealGuild(guildId))
+                                continue;
+                            picked = guid;
+                            break;
+                        }
+                        if (picked)
+                            break;
+                    }
+                    if (!picked)
+                    {
+                        for (uint8 classId : classes)
+                        {
+                            for (DcRaidRndCandidate const& candidate : rndCandidates)
+                                if (candidate.classId == classId &&
+                                    !reserved.count(candidate.guid.GetCounter()) &&
+                                    !selected.count(candidate.guid.GetCounter()))
+                                {
+                                    picked = candidate.guid;
+                                    break;
+                                }
+                            if (picked)
+                                break;
+                        }
+                    }
+                    if (!picked || !sCharacterCache->GetCharacterNameByGuid(picked, partySpec))
+                    {
+                        handler->SendSysMessage(
+                            "Not enough available addclass/RND characters for Molten Core.");
+                        return true;
+                    }
+                    selected.insert(picked.GetCounter());
+                    names.push_back(partySpec);
+                }
+            }
+
+            if (names.size() != 10)
+            {
+                handler->SendSysMessage("Molten Core party= currently requires exactly 10 names.");
+                return true;
+            }
+
+            DcRaidLaunchRequest::Request request;
+            request.schema = 1;
+            request.requestId = requestId;
+            request.raidToken = "molten-core";
+            request.members.reserve(names.size());
+            for (std::size_t index = 0; index < names.size(); ++index)
+            {
+                normalizePlayerName(names[index]);
+                ObjectGuid const guid = sCharacterCache->GetCharacterGuidByName(names[index]);
+                if (!guid)
+                {
+                    handler->SendSysMessage("Unknown character: " + names[index]);
+                    return true;
+                }
+
+                DcRaidLaunchRequest::Role role = DcRaidLaunchRequest::Role::Dps;
+                if (index == 0)
+                    role = DcRaidLaunchRequest::Role::MainTank;
+                else if (index == 1)
+                    role = DcRaidLaunchRequest::Role::OffTank;
+                else if (index < 4)
+                    role = DcRaidLaunchRequest::Role::Healer;
+
+                request.members.push_back({guid.GetCounter(), names[index], role,
+                                           static_cast<std::uint32_t>(index / 5 + 1)});
+            }
+            result = coordinator.Accept(requestId, request, issuer);
+        }
+        if (!result.ok)
+        {
+            handler->SendSysMessage(Acore::StringFormat("Raid request rejected [{}]: {}",
+                                                        static_cast<int>(result.stage), result.message));
+            return true;
+        }
+
+        if (!DungeonClear::RaidProvisioning::Enqueue(
+                result.request, issuer->GetSession() ? issuer->GetSession()->GetAccountId() : 0,
+                issuer->GetGUID()))
+        {
+            handler->SendSysMessage("Raid request accepted but provisioning job already exists.");
+            return true;
+        }
+
+        handler->SendSysMessage(Acore::StringFormat(
+            "Raid request accepted: {} ({} members). Provisioning job queued.",
+            result.request.requestId, result.request.members.size()));
+        return true;
+    }
+
+    static bool HandleRaidStatus(ChatHandler* handler, Tail args)
+    {
+        std::istringstream input{std::string(args)};
+        std::string requestId;
+        input >> requestId;
+        if (requestId.empty())
+        {
+            handler->SendSysMessage("Usage: .dc raid status <requestId>");
+            return true;
+        }
+
+        DungeonClear::RaidProvisioning::Job job;
+        if (!DungeonClear::RaidProvisioning::Find(requestId, job))
+        {
+            handler->SendSysMessage("Provisioning job not found: " + requestId);
+            return true;
+        }
+
+        char const* state = job.state == DungeonClear::RaidProvisioning::State::Queued ? "queued" :
+            job.state == DungeonClear::RaidProvisioning::State::LoggingIn ? "logging-in" :
+            job.state == DungeonClear::RaidProvisioning::State::Ready ? "ready" : "failed";
+        if (job.state == DungeonClear::RaidProvisioning::State::GroupReady)
+            state = "group-ready";
+        else if (job.state == DungeonClear::RaidProvisioning::State::Teleporting)
+            state = "teleporting";
+        else if (job.state == DungeonClear::RaidProvisioning::State::AtEntrance)
+            state = "at-entrance";
+        handler->SendSysMessage(Acore::StringFormat(
+            "Raid provisioning {}: {} ({}/{} online). {}",
+            job.requestId, state, job.onlineCount, job.memberCount,
+            job.message.empty() ? (job.state == DungeonClear::RaidProvisioning::State::AtEntrance ?
+                "raid roster is on Molten Core map; Dungeon Clear is not started yet." :
+                job.state == DungeonClear::RaidProvisioning::State::GroupReady ?
+                "group created; teleport and Dungeon Clear are not started yet." :
+                "group/login/teleport are not started yet.") : job.message));
+        return true;
+    }
+#endif
 
     // --- `.dc test` — the automated test-run harness ------------------------
     // These act on DcTestRunManager directly (never DispatchToTankBots: the
@@ -466,13 +690,10 @@ public:
     // mean hand-running `.appear <botname>` then `.dc spectate`, and the addon
     // button refuses outright because its transport is the party channel.
     //
-    // Sequence: hide the GM (mobs must not aggro the watcher and corrupt the
-    // run), bind + teleport to the run instance's ENTRANCE (the body stays out
-    // of the party's way — farsight does the actual watching), and arm the
-    // follow camera to start on arrival — the teleport is asynchronous, and the
-    // teleport teardown hook deliberately stops any live camera on the way out,
-    // so the camera cannot be started here. `.dc test watch off` ends it and
-    // puts the GM's own visibility back.
+    // Target selection and entrance lookup stay here. The generic spectator
+    // service hides the GM, owns bind/teleport/return bookkeeping and arms the
+    // follow camera after the asynchronous teleport. `.dc test watch off`
+    // delegates the complete teardown to that same service.
     //
     // Watching a SECOND run is the same command again, with no manual cleanup
     // in between: DcWatchHop works out which binds have to be released and
@@ -496,38 +717,10 @@ public:
         std::string selector(selectorArg);
         if (selector == "off" || selector == "stop")
         {
-            // Unconditional: Stop also disarms a request that is still waiting
-            // out a loading screen, which IsActive can't see. It announces on
-            // its own when a camera was actually running.
-            bool const wasActive = DcSpectator::IsActive(gm);
-            DcSpectator::Stop(gm);
-            if (!wasActive)
-                handler->SendSysMessage("No spectator camera running (any pending watch request is cancelled).");
-
-            // Leave the instance system the way we found it. A watcher parked
-            // inside a finished test copy holds it open and stays saved to it —
-            // on a heroic map, that is the map's daily lockout spent on a run
-            // that is already over. Body back out first (the recall position
-            // was taken on the way in), then drop the binds we made.
-            std::vector<DcWatchHop::Bind> const held = HeldWatchBinds(gm);
-            if (!held.empty())
-            {
-                bool const insideAWatchedCopy =
-                    gm->IsInWorld() &&
-                    std::any_of(held.begin(), held.end(),
-                                [gm](DcWatchHop::Bind const& b)
-                                {
-                                    return b.mapId == gm->GetMapId() &&
-                                           b.instanceId == gm->GetInstanceId();
-                                });
-                if (insideAWatchedCopy && !gm->IsBeingTeleported())
-                {
-                    gm->TeleportTo(gm->m_recallMap, gm->m_recallX, gm->m_recallY,
-                                   gm->m_recallZ, gm->m_recallO);
-                    handler->SendSysMessage("Returned to where you were before watching.");
-                }
-                ReleaseWatchBinds(gm, held);
-            }
+            DungeonClear::Spectator::Result const result =
+                DungeonClear::Spectator::Stop(gm);
+            if (!result.message.empty())
+                handler->SendSysMessage(result.message);
             return true;
         }
 
@@ -554,99 +747,6 @@ public:
             return true;
         }
 
-        handler->PSendSysMessage("Watching {}", msg);
-
-        Map* tankMap = tank->GetMap();
-        Difficulty const tankDiff = tank->GetDifficulty(tankMap->IsRaid());
-        InstanceSave* targetSave = sInstanceSaveMgr->GetInstanceSave(tank->GetInstanceId());
-
-        // Key binds the way InstanceSaveMgr stores them: by the SAVE's
-        // difficulty, which is already normalised for shared-difficulty maps.
-        // PlayerUnbindInstance does NOT re-normalise its argument, so a release
-        // keyed off the tank's raw difficulty could miss the row it must drop.
-        DcWatchHop::Bind const target{
-            tank->GetMapId(),
-            static_cast<uint8>(targetSave ? targetSave->GetDifficulty() : tankDiff),
-            tank->GetInstanceId()};
-
-        // What the core thinks this watcher is saved to on the run's map right
-        // now. It may name a copy we never bound them to (their own lockout),
-        // and either way it is what PlayerGetDestinationInstanceId will hand
-        // the teleport unless we clear it.
-        uint32 boundInstanceId = 0;
-        if (InstancePlayerBind* bind = sInstanceSaveMgr->PlayerGetBoundInstance(
-                gm->GetGUID(), target.mapId, Difficulty(target.difficulty)))
-            if (bind->save)
-                boundInstanceId = bind->save->GetInstanceId();
-
-        std::vector<DcWatchHop::Bind> const held = HeldWatchBinds(gm);
-        DcWatchHop::Plan const plan = DcWatchHop::Decide(
-            {gm->GetMapId(), gm->GetInstanceId()}, target, boundInstanceId, held);
-
-        // Already standing in the run's copy: nothing to teleport, just take
-        // the seat.
-        if (plan.alreadyThere && gm->IsInWorld())
-        {
-            std::string whyNot;
-            if (!DcSpectator::StartFollow(gm, tank, &whyNot))
-                handler->SendSysMessage(whyNot);
-            return true;
-        }
-
-        // Hopping straight from one run to the next: end the old camera HERE,
-        // not inside TeleportTo's teardown hook. Stop undoes a GM-mode flip we
-        // made, so letting it fire mid-flight would un-hide the watcher in the
-        // middle of the next run AND lose the flag that records the flip. Ask
-        // first, stop second, re-apply third.
-        bool gmModeApplied = DcSpectator::HiddenByWatch(gm);
-        DcSpectator::Stop(gm);
-
-        // Hide the watcher before they land. A visible, targetable GM in the
-        // instance pulls aggro and invalidates the very run being observed.
-        // DcSpectator::Stop restores this exactly when we were the ones to
-        // change it — and only then, so a GM who was already in GM mode of
-        // their own accord stays that way.
-        if (!gm->IsGameMaster())
-        {
-            gm->SetGameMaster(true);
-            if (!gmModeApplied)
-                handler->SendSysMessage("GM mode enabled so the run doesn't see you (restored when you stop).");
-            gmModeApplied = true;
-        }
-
-        // Release before binding, never bind over the top. PlayerBindToInstance
-        // overwrites the row in place without calling RemovePlayer on the save
-        // it drops (leaking the watcher onto a finished copy's player list),
-        // and its `!bind.perm || permanent` ASSERT would take the server down
-        // outright if a heroic lockout ever sat where a normal bind is going.
-        ReleaseWatchBinds(gm, plan.release);
-        if (plan.bindToTarget && targetSave)
-        {
-            sInstanceSaveMgr->PlayerBindToInstance(gm->GetGUID(), targetSave,
-                                                   !targetSave->CanReset(), gm);
-            g_watchBinds[gm->GetGUID()].push_back(target);
-        }
-
-        if (tankMap->IsRaid())
-            gm->SetRaidDifficulty(tank->GetRaidDifficulty());
-        else
-            gm->SetDungeonDifficulty(tank->GetDungeonDifficulty());
-
-        // `.recall` (and `watch off`) get the GM back out — but only snapshot
-        // the way IN from the outside world. Hopping run-to-run must not
-        // overwrite it with a spot inside the instance being left, or there is
-        // no longer anywhere to go back to.
-        bool const hoppingBetweenRuns =
-            gm->IsInWorld() &&
-            std::any_of(held.begin(), held.end(),
-                        [gm](DcWatchHop::Bind const& b)
-                        {
-                            return b.mapId == gm->GetMapId() &&
-                                   b.instanceId == gm->GetInstanceId();
-                        });
-        if (!hoppingBetweenRuns)
-            gm->SaveRecallPosition();
-
         // Land at the instance ENTRANCE, not on the tank. Farsight renders from
         // the seer's position, so the camera looks the same either way — but
         // dropping the GM's body into the middle of a live pull puts it in
@@ -657,48 +757,30 @@ public:
         // Preference order: the run's own registry row (per-WING for split maps
         // like Dire Maul, where a bare map lookup can't tell the wings apart),
         // then the map's entrance areatrigger, then the tank as a last resort.
-        float tx = tank->GetPositionX();
-        float ty = tank->GetPositionY();
-        float tz = tank->GetPositionZ();
-        float to = tank->GetOrientation();
+        DungeonClear::Spectator::Entrance entrance{
+            tank->GetPositionX(), tank->GetPositionY(),
+            tank->GetPositionZ(), tank->GetOrientation()};
         if (DcTestDungeonRegistry::Row const* row = DcTestDungeonRegistry::Find(dungeonToken);
             row && row->mapId == tank->GetMapId())
         {
-            tx = row->x;
-            ty = row->y;
-            tz = row->z;
-            to = row->o;
+            entrance = {row->x, row->y, row->z, row->o};
         }
         else if (AreaTriggerTeleport const* at = sObjectMgr->GetMapEntranceTrigger(tank->GetMapId()))
         {
-            tx = at->target_X;
-            ty = at->target_Y;
-            tz = at->target_Z;
-            to = at->target_Orientation;
+            entrance = {at->target_X, at->target_Y, at->target_Z, at->target_Orientation};
         }
 
-        // Arm the camera AFTER the teleport call, never before: TeleportTo
-        // fires PLAYERHOOK_ON_BEFORE_TELEPORT synchronously, and that hook
-        // calls DcSpectator::Stop — which disarms pending requests. Arming
-        // first would have the teleport immediately cancel its own camera.
-        //
-        // forceNewInstance is what makes run-to-run hopping work on the SAME
-        // map: TeleportTo's near-teleport branch triggers on the map id alone,
-        // so without it the GM would just slide around inside the copy they
-        // are trying to leave.
-        if (!gm->TeleportTo(tank->GetMapId(), tx, ty, tz, to, 0, nullptr,
-                            plan.forceNewInstance))
+        DungeonClear::Spectator::Result const result =
+            DungeonClear::Spectator::Start(gm, {tankGuid, entrance});
+        if (!result.accepted)
         {
-            if (gmModeApplied)
-                gm->SetGameMaster(false);
-            // Don't leave a lockout behind for a copy the GM never reached.
-            if (plan.bindToTarget && targetSave)
-                ReleaseWatchBinds(gm, {target});
-            handler->SendSysMessage("Teleport into the run's instance was refused.");
+            handler->SendSysMessage(result.message);
             return true;
         }
 
-        DcSpectator::RequestFollowOnArrival(gm, tankGuid, gmModeApplied);
+        handler->PSendSysMessage("Watching {}", msg);
+        if (!result.message.empty())
+            handler->SendSysMessage(result.message);
         return true;
     }
 

@@ -67,6 +67,16 @@ namespace DcWatchHop
         std::vector<Bind> release;
     };
 
+    struct SessionPlan
+    {
+        Plan hop;
+        // Snapshot the return position only when entering from outside a copy
+        // already bound by this watch service.
+        bool saveReturnPosition = false;
+        // The watch session must ensure GM mode is on and restore it on stop.
+        bool ownGmMode = false;
+    };
+
     // `viewer`  — where the watcher stands right now.
     // `target`  — the run's map / difficulty / instance. instanceId 0 means the
     //             destination isn't instanced, so no bind work is possible.
@@ -77,6 +87,10 @@ namespace DcWatchHop
     //             released yet.
     Plan Decide(Where viewer, Bind target, uint32_t boundInstanceId,
                 std::vector<Bind> const& held);
+
+    SessionPlan DecideSession(Where viewer, Bind target, uint32_t boundInstanceId,
+                              std::vector<Bind> const& held, bool viewerIsGameMaster,
+                              bool watchOwnsGmMode);
 }
 
 #endif  // _PLAYERBOT_DCWATCHHOP_H

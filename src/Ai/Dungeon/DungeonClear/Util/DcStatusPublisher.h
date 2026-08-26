@@ -6,12 +6,27 @@
 #ifndef _DC_STATUS_PUBLISHER_H
 #define _DC_STATUS_PUBLISHER_H
 
+#include <cstdint>
 #include <functional>
 #include <string>
+
 #include "Define.h"
 #include "ObjectGuid.h"
 
 class PlayerbotAI;
+
+struct DcStatusPayload
+{
+    bool enabled = false;
+    uint32 bossEntry = 0;
+    std::string bossName;
+    std::string stall;
+    uint32 skipped = 0;
+    std::string state;
+    std::string detail;
+    uint32 pullSetting = 0;
+    uint32 pullDecision = 0;
+};
 
 class DcStatusPublisher
 {
@@ -31,6 +46,7 @@ public:
     // registry of clearing tanks (mirrors the follow-reaper pattern below);
     // TickStatusPushes is the throttled detector driven from the world tick.
     static std::string BuildStatusPayload(PlayerbotAI* botAI);
+    static bool ParseStatusPayload(std::string const& payload, DcStatusPayload& status);
 
     // Unconditionally send the current STATUS payload and refresh the
     // change-detector's snapshot for this bot, so an explicit request never

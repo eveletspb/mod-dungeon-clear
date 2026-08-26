@@ -51,6 +51,32 @@ See [Configuration](#configuration).
   playerbots AI engine. It subclasses playerbots' strategy, action, trigger, and
   value classes and links against them. It is not standalone.
 
+## SBAzeroth fork differences
+
+This checkout is a maintained fork of the original
+[`jrad7/mod-dungeon-clear`](https://github.com/jrad7/mod-dungeon-clear). The
+core tank-driven dungeon AI and the companion addon contract remain compatible,
+but this fork adds the integration surface required by SBAzeroth and
+`mod-raid-runner`:
+
+- a public `DungeonClearController` for authorized start, stop, status, and
+  live-snapshot requests;
+- structured stop causes and terminal lifecycle reporting instead of relying
+  only on chat text;
+- raid catalog, manifest validation, and raid request adapters used by the
+  companion `mod-raid-runner` module;
+- shared live bot/boss telemetry helpers for raid monitoring;
+- a read-only spectator watch service, including free-fly and bot-follow watch
+  targets;
+- CMake-registered controller, raid-admission, request-gateway, and spectator
+  regression tests.
+
+The fork deliberately keeps raid-specific provisioning policy in
+`mod-raid-runner`. `mod-dungeon-clear` owns generic execution and exposes the
+public controller boundary; it does not create accounts or generate missing
+playerbots. When updating from upstream, preserve this API boundary or update
+the matching `mod-raid-runner` revision at the same time.
+
 ## Install
 
 1. Clone into `modules/mod-dungeon-clear/`.

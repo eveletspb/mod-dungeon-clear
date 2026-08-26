@@ -4,6 +4,7 @@
  */
 
 #include "DungeonClearActions.h"
+#include "Api/DungeonClearController.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "TestRun/DcTestRunManager.h"
 
@@ -258,10 +259,14 @@ namespace DcActionShared
     }
 
 
-    void DisableDungeonClear(PlayerbotAI* botAI, std::string const& reason)
+    void DisableDungeonClear(
+        PlayerbotAI* botAI,
+        std::string const& reason,
+        DungeonClear::StopCause cause)
     {
         AiObjectContext* ctx = botAI->GetAiObjectContext();
         Player* bot = botAI->GetBot();
+        DungeonClear::Controller::Instance().RecordStopped(bot, cause, reason);
         // One reset clears the whole run-level state — enabled flag, the pause
         // cluster (paused / reason / auto-paused door), the selected-boss override,
         // and the two leader-fight latches (leader-combat-since / party-engaged) —

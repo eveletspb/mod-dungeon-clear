@@ -72,4 +72,25 @@ namespace DcWatchHop
 
         return plan;
     }
+
+    SessionPlan DecideSession(Where viewer, Bind target, uint32_t boundInstanceId,
+                              std::vector<Bind> const& held, bool viewerIsGameMaster,
+                              bool watchOwnsGmMode)
+    {
+        SessionPlan session;
+        session.hop = Decide(viewer, target, boundInstanceId, held);
+        session.ownGmMode = watchOwnsGmMode || !viewerIsGameMaster;
+
+        session.saveReturnPosition = true;
+        for (Bind const& bind : held)
+        {
+            if (bind.mapId == viewer.mapId && bind.instanceId == viewer.instanceId)
+            {
+                session.saveReturnPosition = false;
+                break;
+            }
+        }
+
+        return session;
+    }
 }

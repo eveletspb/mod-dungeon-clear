@@ -2220,16 +2220,20 @@ bool DungeonClearDisableOnDeathAction::Execute(Event /*event*/)
     std::string const& deadName = plan.deadName;
 
     std::string reason;
+    DungeonClear::StopCause stopCause = DungeonClear::StopCause::Internal;
     switch (plan.verdict.reason)
     {
         case DcRezDecision::Reason::Wipe:
+            stopCause = DungeonClear::StopCause::Wipe;
             reason = "The party wiped \xe2\x80\x94 dungeon clear disabled. Type 'dc on' when ready to resume.";
             break;
         case DcRezDecision::Reason::NoRezzer:
+            stopCause = DungeonClear::StopCause::NoRezzer;
             reason = deadName + " died and no one left alive can resurrect \xe2\x80\x94 dungeon clear "
                      "disabled. Type 'dc on' when ready to resume.";
             break;
         case DcRezDecision::Reason::TimedOut:
+            stopCause = DungeonClear::StopCause::ResurrectionTimeout;
             reason = "Couldn't get " + deadName + " resurrected in time \xe2\x80\x94 dungeon clear "
                      "disabled. Type 'dc on' when ready to resume.";
             break;
@@ -2240,13 +2244,16 @@ bool DungeonClearDisableOnDeathAction::Execute(Event /*event*/)
             break;
     }
 
-    DisableDungeonClear(RunOwnerAI(bot, botAI), reason);
+    DisableDungeonClear(RunOwnerAI(bot, botAI), reason, stopCause);
     return true;
 }
 
 bool DungeonClearDisableOnClearedAction::Execute(Event /*event*/)
 {
-    DisableDungeonClear(RunOwnerAI(bot, botAI), DcActionShared::kReasonAllCleared);
+    DisableDungeonClear(
+        RunOwnerAI(bot, botAI),
+        DcActionShared::kReasonAllCleared,
+        DungeonClear::StopCause::Completed);
     return true;
 }
 
